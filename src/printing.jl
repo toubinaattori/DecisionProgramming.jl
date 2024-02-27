@@ -22,13 +22,11 @@ function print_decision_strategy(diagram::InfluenceDiagram, Z::DecisionStrategy,
     probs = state_probabilities.probs
     for (d, I_d, Z_d) in zip(Z.D, Z.I_d, Z.Z_d)
         if augmented_states
-            K_j = filter(x -> x ∈ I_d ,map(x -> x[1] , filter(x -> x[2] == d,diagram.K)))
+            K_j = filter(k -> k ∈ I_d && isempty(diagram.I_i[k]), diagram.K)
             states = diagram.S[I_d]
             j = 1
-            for i in I_d
-                if i ∈ K_j
-                    states[j] = states[j] + 1
-                end
+            for i in K_j
+                states[j] = states[j] + 1
                 j = j+ 1
             end
             s_I = vec(collect(paths(states)))
@@ -76,46 +74,36 @@ Print decision strategy.
 print_decision_strategy(diagram, Z, S_probabilities)
 ```
 """
-function print_information_structure(diagram::InfluenceDiagram, x_x::Dict{Tuple{Node,Node},VariableRef};x_xx::Dict{Tuple{Node,Node},Dict{Path,VariableRef}} = Dict{Tuple{Node,Node},Dict{Path,VariableRef}}())
+function print_information_structure(diagram::InfluenceDiagram; x_x::Dict{Node,VariableRef} = Dict{Node,VariableRef}(), I::InformationDecisions = InformationDecisions([],[],[]))
         information_structure = []
         cost = []
-        if isempty(x_xx)
-            for k in keys(x_x)
-                if value.(x_x[k]) > 0
-                    push!(information_structure,"$(diagram.Nodes[k[1]].name) --> $(diagram.Nodes[k[2]].name)")
-                    push!(cost,diagram.Cs[k])
-                end
+        decision = []
+        information_state = []
+        for k in keys(x_x)
+            push!(information_structure,"$(diagram.Nodes[k].name)")
+            push!(cost,diagram.Cs[k])
+            if value.(x_x[k]) > 0
+                push!(decision,"yes")
+            else
+                push!(decision,"no")
             end
-            df = DataFrame(information_structure = information_structure, cost = cost)
-            pretty_table(df, header = ["Arc", "Cost"], alignment=:l)
-        else
-            conditioning_nodes = []
-            paths = []
-            for k in keys(x_x)
-                if value.(x_x[k]) > 0
-                    push!(information_structure,"$(diagram.Nodes[k[1]].name) --> $(diagram.Nodes[k[2]].name)")
-                    push!(cost,diagram.Cs[k])
-                    push!(conditioning_nodes,"--")
-                    push!(paths,"--")
-                end
-            end
-            for k in keys(x_xx)
-                path = []
-                for b in keys(x_xx[k])
-                    if value.(x_xx[k][b]) > 0
-                        push!(path,join([diagram.States[n][s] for (n,s) in zip(diagram.Pj[k],b)],", "))
-                    end
-                end
-                if !isempty(path)
-                    push!(information_structure,"$(diagram.Nodes[k[1]].name) --> $(diagram.Nodes[k[2]].name)")
-                    push!(cost,diagram.Cs[k])
-                    push!(conditioning_nodes,join([diagram.Names[i] for i in diagram.Pj[k]], ", "))
-                    push!(paths,join([i for i in path]," or "))
-                end
-            end
-            df = DataFrame(information_structure = information_structure, cost = cost, nodes = conditioning_nodes, paths = paths)
-            pretty_table(df, header = ["Arc", "Cost","If nodes...","...are in states"], alignment=:l)
+            push!(information_state,"--")
         end
+        for (k,I_i,z) in zip(I.K,I.I_i,I.z)
+            dims = diagram.S[I_i]
+            for s in paths(dims)
+                push!(information_structure,"$(diagram.Nodes[k].name)")
+                push!(cost,diagram.Cs[k])
+                if value.(z[s...]) > 0
+                    push!(decision,"yes")
+                else
+                    push!(decision,"no")
+                end
+                push!(information_state,join([ String(diagram.States[i][s_i]) for (i, s_i) in zip(I_i, s)], ", "))
+            end
+        end
+        df = DataFrame(information_structure = information_structure, cost = cost, decision = decision, information_state = information_state)
+        pretty_table(df, header = ["Node", "Cost", "Decision","Information state"], alignment=:l)
 end
 
 

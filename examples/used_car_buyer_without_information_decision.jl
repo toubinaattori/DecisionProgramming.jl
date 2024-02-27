@@ -4,16 +4,15 @@ using DecisionProgramming
 
 @info("Creating the influence diagram.")
 diagram = InfluenceDiagram()
-diagram.Cost = []
 
 add_node!(diagram, ChanceNode("O", [], ["lemon", "peach"]))
-add_node!(diagram, ChanceNode("R", ["O"], ["lemon", "peach"]))
-add_node!(diagram, DecisionNode("A", ["R"], ["buy without guarantee", "buy with guarantee", "don't buy"],["R"]))
+add_node!(diagram, ChanceNode("R", ["O"], ["lemon", "peach"],true))
+add_node!(diagram, DecisionNode("A", ["R"], ["buy without guarantee", "buy with guarantee", "don't buy"]))
 
 add_node!(diagram, ValueNode("V2", ["A"]))
 add_node!(diagram, ValueNode("V3", ["O", "A"]))
 
-add_costs!(diagram,Costs(("R","A"), 25))
+add_costs!(diagram,Costs("R", 25))
 
 generate_arcs!(diagram)
 

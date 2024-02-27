@@ -1,16 +1,9 @@
 using JuMP,Combinatorics
 
-struct InformationStructureVariables{N} <: AbstractDict{Tuple{Node,Node}, VariableRef}
-    data::Dict{Tuple{Node,Node}, VariableRef}
-end
 
-struct StateDependentInformationStructureVariables{N} <: AbstractDict{Tuple{Node,Node}, AbstractDict{Path,VariableRef}}
-    data::Dict{Tuple{Node,Node}, Dict{Path,VariableRef}}
-end
-
-function decision_variable(model::Model, S::States, d::Node, I_d::Vector{Node},K::Vector{Tuple{Node,Node}},Pj::Dict{Tuple{Node,Node},Vector{Node}},augmented_states::Bool,binary::Bool, base_name::String="")
+function decision_variable(model::Model, S::States, d::Node, I_d::Vector{Node},K::Vector{Node},augmented_states::Bool,binary::Bool, base_name::String="")
     # Create decision variables.
-    if augmented_states
+    if augmented_states 
         dims = augmented_dimensions!(S,I_d,K,d)
     else
         dims = S[[I_d; d]]
@@ -42,6 +35,19 @@ function decision_variable(model::Model, S::States, d::Node, I_d::Vector{Node},K
     return z_d
 end
 
+struct InformationDecisions
+    K::Vector{Node}
+    I_i::Vector{Vector{Node}}
+    z::Vector{<:Array{VariableRef}}
+    function InformationDecisions()
+        return new([], [], Array{VariableRef}[])
+    end
+    function InformationDecisions(K,I_i,z)
+        return new(K, I_i, z)
+    end
+end
+
+
 struct DecisionVariables
     D::Vector{Node}
     I_d::Vector{Vector{Node}}
@@ -68,7 +74,7 @@ z = DecisionVariables(model, diagram)
 ```
 """
 function DecisionVariables(model::Model, diagram::InfluenceDiagram; names::Bool=false, name::String="z", binary::Bool = true, augmented_states::Bool = false)
-    DecisionVariables(diagram.D, diagram.I_j[diagram.D], [decision_variable(model, diagram.S, d, I_d,diagram.K,diagram.Pj, augmented_states, binary, (names ? "$(name)_$(d)" : "")) for (d, I_d) in zip(diagram.D, diagram.I_j[diagram.D])])
+    DecisionVariables(diagram.D, diagram.I_j[diagram.D], [decision_variable(model, diagram.S, d, I_d,diagram.K, augmented_states, binary, (names ? "$(name)_$(d)" : "")) for (d, I_d) in zip(diagram.D, diagram.I_j[diagram.D])])
 end
 
 function is_forbidden(s::Path, forbidden_paths::Vector{ForbiddenPath})
@@ -81,7 +87,21 @@ function path_compatibility_variable(model::Model, p_s::Float64, base_name::Stri
     x = @variable(model, base_name=base_name)
 
     # Constraint on the lower and upper bounds.
-    @constraint(model, 0 ≤ x ≤ 1)
+    #@constraint(model, 0 ≤ x ≤ 1)
+    @constraint(model, 0 ≤ x ≤ p_s)
+
+
+    return x
+end
+
+function path_compatibility_variable(model::Model, diagram::InfluenceDiagram, s::Path, base_name::String="")
+    # Create a path compatiblity variable
+    x = @variable(model, base_name=base_name)
+    can_be_na = findall(x -> "N/A" in x,diagram.States)
+    i = map(x -> (Int16(x),Int64(diagram.S[x])),can_be_na)
+
+    # Constraint on the lower and upper bounds.
+    @constraint(model, 0 ≤ x ≤ diagram.P(s,i))
 
 
     return x
@@ -107,8 +127,7 @@ Base.iterate(x_s::PathCompatibilityVariables) = iterate(x_s.data)
 Base.iterate(x_s::PathCompatibilityVariables, i) = iterate(x_s.data, i)
 
 
-function decision_strategy_constraint(model::Model, S::States, d::Node, I_d::Vector{Node}, D::Vector{Node}, z::Array{VariableRef}, x_s::PathCompatibilityVariables, K::Vector{Tuple{Node,Node}}, augmented_states::Bool)
-
+function decision_strategy_constraint(model::Model, S::States, d::Node, I_d::Vector{Node}, D::Vector{Node}, z::Array{VariableRef}, x_s::PathCompatibilityVariables, K::Vector{Node}, augmented_states::Bool)
     # states of nodes in information structure (s_d | s_I(d))
     dims = S[[I_d; d]]
 
@@ -122,7 +141,7 @@ function decision_strategy_constraint(model::Model, S::States, d::Node, I_d::Vec
     if augmented_states 
         dims = augmented_dimensions!(S,I_d,K,d)
     end
-
+    
     for s_d_s_Id in paths(S[[I_d; d]]) # iterate through all information states and states of d
         # paths with (s_d | s_I(d)) information structure
         feasible_paths = filter(s -> s[[I_d; d]] == s_d_s_Id, existing_paths)
@@ -194,19 +213,25 @@ function PathCompatibilityVariables(model::Model,
 
     # Create path compatibility variable for each effective path.
     N = length(diagram.S)
-    variables_x_s = Dict{Path{N}, VariableRef}(
-        s => path_compatibility_variable(model, diagram.P(s), (names ? "$(name)$(s)" : ""))
-        for s in paths(diagram.S, fixed)
-        if !iszero(diagram.P(s)) && !is_forbidden(s, forbidden_paths)
-    )
-
+    if !diagram.K_to_NA
+        variables_x_s = Dict{Path{N}, VariableRef}(
+            s => path_compatibility_variable(model, diagram.P(s), (names ? "$(name)$(s)" : ""))
+            for s in paths(diagram.S, fixed)
+            if !iszero(diagram.P(s)) && !is_forbidden(s, forbidden_paths)
+        )
+    else
+        variables_x_s = Dict{Path{N}, VariableRef}(
+            s => path_compatibility_variable(model, diagram, s, (names ? "$(name)$(s)" : ""))
+            for s in paths(diagram.S, fixed)
+            if (!iszero(diagram.P(s,map(x -> (x,Int64(diagram.S[x])) ,filter(z -> diagram.Nodes[z].can_be_na,diagram.C)))) || contains_na!(s,diagram)) && !is_forbidden(s, forbidden_paths)
+        )
+    end
     x_s = PathCompatibilityVariables(variables_x_s)
 
     # Add decision strategy constraints for each decision node
     for (d, z_d) in zip(z.D, z.z)
         decision_strategy_constraint(model, diagram.S, d, diagram.I_j[d], z.D, z_d, x_s,diagram.K,augmented_states)
     end
-
     if probability_cut
         @constraint(model, sum(x * diagram.P(s) * probability_scale_factor for (s, x) in x_s) == 1.0 * probability_scale_factor)
     end
@@ -214,246 +239,140 @@ function PathCompatibilityVariables(model::Model,
     x_s
 end
 
-"""
-ConstraintsOnPathProbabilities(model::Model,
-        diagram::InfluenceDiagram,
-        z::DecisionVariables,
-        x_s::PathCompatibilityVariables;
-        names::Bool=false,
-        name::String="x")
-
-Create information structure constraints for path probabilities.
-
-# Arguments
-- `model::Model`: JuMP model into which variables are added.
-- `diagram::InfluenceDiagram`: Influence diagram structure.
-- `z::DecisionVariables`: Decision variables from `DecisionVariables` function.
-- `x_s::PathCompatibilityVariables`: Path compatibility variables from `PathCompatibilityVariables` function.
-- `names::Bool`: Use names or have JuMP variables be anonymous.
-- `name::String`: Prefix for predefined decision variable naming convention.
-
-# Examples
-```julia
-    x_x = ConstraintsOnPathProbabilities(model, diagram, z, x_s, names=true, name="x")
-```
-"""
-
-function ConstraintsOnPathProbabilities(model::Model,
-    diagram::InfluenceDiagram,
-    z::DecisionVariables,
-    x_s::PathCompatibilityVariables;
-    names::Bool=false,
-    name::String="x")
-
-
-    # Create information structure variable for each correspondig conditional edge.
-    variables_x = Dict{Tuple{Node,Node}, VariableRef}(
-        s => information_structure_variable(model, (names ? "$(name)$(s)" : ""))
-        for s in diagram.K
-    )
-
-
-
-    # Add information constraints for each decision node
-    for (d, z_d) in zip(z.D, z.z)
-        path_probability_constraints(model, diagram.S, d, diagram.I_j[d], z_d, x_s, diagram.K,variables_x)
-    end
-    return variables_x
+function contains_na!(s::Path,diagram::InfluenceDiagram)
+    can_be_na = findall(x -> "N/A" in x,diagram.States)
+    any(i -> diagram.S[i] == s[i], can_be_na)
 end
 
-function path_probability_constraints(model::Model, S::States, d::Node, I_d::Vector{Node}, z::Array{VariableRef}, x_s::PathCompatibilityVariables, K::Vector{Tuple{Node,Node}}, x_x::Dict{Tuple{Node,Node},VariableRef})
+function path_probability_constraints(model::Model, S::States, d::Node, I_d::Vector{Node}, z::Array{VariableRef}, x_s::PathCompatibilityVariables, I::InformationDecisions)
     # states of nodes in information structure (s_d | s_I(d))
-    for k in filter(tup -> tup[2] == d, K)
-        nodes = [I_d;d]
-        d_index = findall(x -> x == d, nodes)
-        k_index = findall(x -> x == k[1], nodes)
-        Id_index = findall(x -> x in I_d && x != k[1], nodes)
-        Id_without_k = filter(x -> x != k[1], I_d)
-        dims = S[[I_d; d]]
+    for (k,I_i,z_i) in zip(I.K,I.I_i,I.z)
+        if k in I_d && isempty(I_i)
+            nodes = [I_d;d]
+            d_index = findall(x -> x == d, nodes)
+            k_index = findall(x -> x == k, nodes)
+            Id_index = findall(x -> x in I_d && x != k, nodes)
+            Id_without_k = filter(x -> x != k, I_d)
+            dims = S[[I_d; d]]
 
-        # paths that have a corresponding path compatibility variable
-        existing_paths = keys(x_s)
+            # paths that have a corresponding path compatibility variable
+            existing_paths = keys(x_s)
 
-        for s_d_s_Id in paths(dims) # iterate through all information states and states of d
-            # paths with (s_d | s_I(d)) information structure
-            s_prime = filter(s -> s[d] != s_d_s_Id[first(d_index)] && s[Id_without_k] == s_d_s_Id[Id_index] && s[k[1]] != s_d_s_Id[first(k_index)], existing_paths)
-            @constraint(model, sum(get(x_s, s, 0) for s in s_prime) <= (length(s_prime)+1)*(1 - z[s_d_s_Id...] + x_x[k]))
+            for s_d_s_Id in paths(dims) # iterate through all information states and states of d
+                # paths with (s_d | s_I(d)) information structure
+                s_prime = filter(s -> s[d] != s_d_s_Id[first(d_index)] && s[Id_without_k] == s_d_s_Id[Id_index] && s[k[1]] != s_d_s_Id[first(k_index)], existing_paths)
+                @constraint(model, sum(get(x_s, s, 0) for s in s_prime) <= (length(s_prime)+1)*(1 - z[s_d_s_Id...] + z_i[()...]))
+            end
         end
     end
 end
 
-"""
-ConstraintsOnLocalDecisions(model::Model,
-        diagram::InfluenceDiagram,
-        z::DecisionVariables,
-        x_s::PathCompatibilityVariables;
-        names::Bool=false,
-        name::String="x")
-
-Create information structure constraints for local decisions.
-
-# Arguments
-- `model::Model`: JuMP model into which variables are added.
-- `diagram::InfluenceDiagram`: Influence diagram structure.
-- `z::DecisionVariables`: Decision variables from `DecisionVariables` function.
-- `x_s::PathCompatibilityVariables`: Path compatibility variables from `PathCompatibilityVariables` function.
-- `names::Bool`: Use names or have JuMP variables be anonymous.
-- `name::String`: Prefix for predefined decision variable naming convention.
-
-# Examples
-```julia
-    x_x = ConstraintsOnLocalDecisions(model, diagram, z, x_s, names=true, name="x")
-```
-"""
-
-function ConstraintsOnLocalDecisions(model::Model,
-    diagram::InfluenceDiagram,
-    z::DecisionVariables,
-    x_s::PathCompatibilityVariables;
-    names::Bool=false,
-    name::String="x",
-    forbidden_paths::Vector{ForbiddenPath}=ForbiddenPath[],
-    fixed::FixedPath=Dict{Node, State}(),
-    probability_cut::Bool=true,
-    probability_scale_factor::Float64=1.0)
-
-
-    # Create path compatibility variable for each effective path.
-    N = length(diagram.S)
-    variables_x = Dict{Tuple{Node,Node}, VariableRef}(
-        s => information_structure_variable(model, (names ? "$(name)$(s)" : ""))
-        for s in diagram.K
-    )
-
-
-    # Add information constraints for each decision node
-    for (d, z_d) in zip(z.D, z.z)
-        local_decision_constraints(model, diagram.S, d, diagram.I_j[d], z_d, x_s, diagram.K, variables_x)
-    end
-    return variables_x
-end
-
-function local_decision_constraints(model::Model, S::States, d::Node, I_d::Vector{Node}, z::Array{VariableRef}, x_s::PathCompatibilityVariables, K::Vector{Tuple{Node,Node}}, x_x::Dict{Tuple{Node,Node},VariableRef})
+function local_decision_constraints(model::Model, S::States, d::Node, I_d::Vector{Node}, z::Array{VariableRef}, x_s::PathCompatibilityVariables,I::InformationDecisions)
     # states of nodes in information structure (s_d | s_I(d))
-    for k in filter(tup -> tup[2] == d, K)
-        nodes = [I_d;d]
-        k_index = findall(x -> x == k[1], nodes)
-        Id_without_k = findall(x -> x != k[1], I_d)
-        dims = S[[I_d; d]]
-
-        for s_d_s_Id in paths(dims) # iterate through all information states and states of d
-            # paths with (s_d | s_I(d)) information structure
-            for s_d_s_k in paths(dims)
-                if s_d_s_k[first(k_index)] != s_d_s_Id[first(k_index)] && s_d_s_k[Id_without_k] == s_d_s_Id[Id_without_k] && last(s_d_s_k) == last(s_d_s_Id)
-                    @constraint(model, z[s_d_s_k...]  >=   z[s_d_s_Id...] - x_x[k])
-                end
-            end 
+    for (k,I_i,z_i) in zip(I.K,I.I_i,I.z)
+        if k in I_d && isempty(I_i)
+            nodes = [I_d;d]
+            k_index = findall(x -> x == k, nodes)
+            Id_without_k = findall(x -> x != k, I_d)
+            dims = S[[I_d; d]]
+            for s_d_s_Id in paths(dims) # iterate through all information states and states of d
+                # paths with (s_d | s_I(d)) information structure
+                for s_d_s_k in paths(dims)
+                    if s_d_s_k[first(k_index)] != s_d_s_Id[first(k_index)] && s_d_s_k[Id_without_k] == s_d_s_Id[Id_without_k] && last(s_d_s_k) == last(s_d_s_Id)
+                        @constraint(model, z[s_d_s_k...]  >=   z[s_d_s_Id...] - z_i[()...])
+                    end
+                end 
+            end
         end
     end
 end
 
 """
-    AugmentedStateVariables(model::Model,
+    InformationDecisions(model::Model,
         diagram::InfluenceDiagram,
         z::DecisionVariables,
         x_s::PathCompatibilityVariables;
+        constraints_on_local_decisions::Bool = false,
+        constraints_on_path_probabilities::Bool = false,
+        constraints_on_augmented_state_space::Bool = false,
         names::Bool=false,
         name::String="x")
 
-Create information structure constraints for augmented states.
+    Create information decisions and constraints.
 
-# Arguments
-- `model::Model`: JuMP model into which variables are added.
-- `diagram::InfluenceDiagram`: Influence diagram structure.
-- `z::DecisionVariables`: Decision variables from `DecisionVariables` function.
-- `x_s::PathCompatibilityVariables`: Path compatibility variables from `PathCompatibilityVariables` function.
-- `names::Bool`: Use names or have JuMP variables be anonymous.
-- `name::String`: Prefix for predefined decision variable naming convention.
+    # Arguments
+    - `model::Model`: JuMP model into which variables are added.
+    - `diagram::InfluenceDiagram`: Influence diagram structure.
+    - `z::DecisionVariables`: Decision variables from `DecisionVariables` function.
+    - `x_s::PathCompatibilityVariables`: Path compatability variables from `PathCompatibilityVariables` function.
+    - `constraints_on_local_decisions::Bool`: Are constraints on local decisions used
+    - `constraints_on_path_probabilities::Bool`: Are constraints on path probabilities used
+    - `constraints_on_augmented_state_space::Bool`: Are constraints on augmented states used
+    - `names::Bool`: Use names or have JuMP variables be anonymous.
+    - `name::String`: Prefix for predefined decision variable naming convention.
 
-# Examples
-```julia
-    x_x = ConstraintsOnPathProbabilities(model, diagram, z, x_s, names=true, name="x")
-```
+    # Examples
+    ```julia
+    I = InformationDecisions(model,diagram,z,x_s,constraints_on_augmented_state_space = true , names = true, name = "x")
+    ```
 """
 
-function AugmentedStateVariables(model::Model,
+function InformationDecisions(model::Model,
     diagram::InfluenceDiagram,
     z::DecisionVariables,
     x_s::PathCompatibilityVariables;
+    constraints_on_local_decisions = false,
+    constraints_on_path_probabilities = false,
+    constraints_on_augmented_state_space = false,
     names::Bool=false,
     name::String="x")
 
+    I = InformationDecisions(diagram.K,diagram.I_i[diagram.K],[information_decisions(model,diagram,k,i_k,name) for (k, i_k) in zip(diagram.K, diagram.I_i[diagram.K])])
 
-    # Create path compatibility variable for each effective path.
-    N = length(diagram.S)
-    variables_x = Dict{Tuple{Node,Node}, VariableRef}(
-        s => information_structure_variable(model, (names ? "$(name)$(s)" : ""))
-        for s in diagram.K
-    )
-
-    # Add information constraints for each decision node
-    for (d, z_d) in zip(z.D, z.z)
-        augmented_state_constraints(model, diagram.S, d, diagram.I_j[d], z_d, x_s, diagram.K,variables_x)
-    end
-    return variables_x
-end
-
-"""
-    StateDependentAugmentedStateVariables(model::Model,
-        diagram::InfluenceDiagram,
-        z::DecisionVariables,
-        x_s::PathCompatibilityVariables;
-        names::Bool=false,
-        name::String="x")
-
-Create state dependent information structure constraints for augmented states.
-
-# Arguments
-- `model::Model`: JuMP model into which variables are added.
-- `diagram::InfluenceDiagram`: Influence diagram structure.
-- `z::DecisionVariables`: Decision variables from `DecisionVariables` function.
-- `x_s::PathCompatibilityVariables`: Path compatibility variables from `PathCompatibilityVariables` function.
-- `names::Bool`: Use names or have JuMP variables be anonymous.
-- `name::String`: Prefix for predefined decision variable naming convention.
-
-# Examples
-```julia
-    (x_x,x_xx) = ConstraintsOnPathProbabilities(model, diagram, z, x_s, names=true, name="x")
-```
-"""
-
-function StateDependentAugmentedStateVariables(model::Model,
-    diagram::InfluenceDiagram,
-    z::DecisionVariables,
-    x_s::PathCompatibilityVariables;
-    names::Bool=false,
-    name::String="x")
-
-    variables_x = Dict{Tuple{Node,Node}, VariableRef}(
-        s => information_structure_variable(model, (names ? "$(name)$(s)" : ""))
-        for s in filter(k -> k ∉ keys(diagram.Pj) ,diagram.K)
-    )
-
-    # Create path compatibility variable for each effective path.
-    variables_xx = Dict{Tuple{Node,Node}, Dict{Path,VariableRef}}()
-    for s in diagram.Pj
-        d = Dict{Path,VariableRef}()
-        for j in paths(diagram.S[s[2]])
-            d[j] = information_structure_variable(model, (names ? "$(name)$(s[1])$(j)" : ""))
+    if constraints_on_local_decisions
+        for (d, z_d) in zip(z.D, z.z)
+            local_decision_constraints(model, diagram.S, d, diagram.I_j[d], z_d, x_s,I)
         end
-        variables_xx[s[1]] = d
+    end
+    if constraints_on_path_probabilities
+        for (d, z_d) in zip(z.D, z.z)
+            path_probability_constraints(model, diagram.S, d, diagram.I_j[d], z_d, x_s, I)
+        end
+    end
+    if constraints_on_augmented_state_space
+        for (d, z_d) in zip(z.D, z.z)
+            augmented_state_constraints(model, diagram.S, d, diagram.I_j[d], z_d, x_s, I)
+        end
     end
 
-
-    # Add information constraints for each decision node
-    for (d, z_d) in zip(z.D, z.z)
-        state_dependent_augmented_state_constraints(model, diagram.S, d, diagram.I_j[d], z_d, x_s,diagram.K, diagram.Pj,variables_x,variables_xx)
+    for (k,I_i,z) in zip(I.K,I.I_i,I.z)
+        if !isempty(I_i)
+            dims = diagram.S[I_i]
+            for s in paths(dims)
+                k_NA = filter(b -> b[I_i] == s && b[k] == diagram.S[k],keys(x_s))
+                k_not_NA = filter(b -> b[I_i] == s && b[k] < diagram.S[k],keys(x_s))
+                @constraint(model,sum(x_s[c] for c in k_NA) <= length(x_s)*(1 - z[s...]))
+                @constraint(model,sum(x_s[c] for c in k_not_NA) <= length(x_s)*z[s...])
+            end
+        end
     end
-    return (variables_x,variables_xx)
+    
+    return I
+
 end
 
-function augmented_state_constraints(model::Model, S::States, d::Node, I_d::Vector{Node}, z::Array{VariableRef}, x_s::PathCompatibilityVariables, K::Vector{Tuple{Node,Node}}, x_x::Dict{Tuple{Node,Node},VariableRef})
+function information_decisions(model::Model,diagram::InfluenceDiagram, k::Node, i_k::Vector{Node}, base_name::String)
+    dims = diagram.S[i_k]
+    z_d = Array{VariableRef}(undef, dims...)
+    for s in paths(dims)
+        z_d[s...] = @variable(model, binary=true, base_name="$(base_name)_$(s)")
+    end
+    return z_d
+end
 
+
+function augmented_state_constraints(model::Model, S::States, d::Node, I_d::Vector{Node}, z::Array{VariableRef}, x_s::PathCompatibilityVariables, I::InformationDecisions)
+    K = I.K[findall(i -> isempty(i),I.I_i)]
     # states of nodes in information structure (s_d | s_I(d))
     dimensions = S[[I_d; d]]
     augmented_dims = augmented_dimensions!(S,I_d,K,d)
@@ -461,73 +380,22 @@ function augmented_state_constraints(model::Model, S::States, d::Node, I_d::Vect
     existing_paths = paths(dimensions)
     augmented_paths = Iterators.filter(x -> x ∉ existing_paths, paths(augmented_dims))
 
-    for k in filter(tup -> tup[2] == d, K)
-        index = findfirst(y -> y == k[1] ,I_d)
-        dimension = dimensions[index]
-        zero = Iterators.filter(x -> x[index] == dimension + 1, augmented_paths)
-        non_zero = Iterators.filter(x -> x[index] < dimension + 1, paths(augmented_dims))
-        @constraint(model,sum(z[s...] for s in non_zero) <= length(paths(augmented_dims))*x_x[k])
-        @constraint(model,sum(z[s...] for s in zero) <= length(paths(augmented_dims))*(1-x_x[k]))
-    end
-end
-
-function state_dependent_augmented_state_constraints(model::Model, S::States, d::Node, I_d::Vector{Node}, z::Array{VariableRef}, x_s::PathCompatibilityVariables, K::Vector{Tuple{Node,Node}}, Pj::Dict{Tuple{Node,Node},Vector{Node}}, x_x::Dict{Tuple{Node,Node},VariableRef}, x_xx::Dict{Tuple{Node,Node}, Dict{Path,VariableRef}})
-    # states of nodes in information structure (s_d | s_I(d))
-    dims = S[[I_d; d]]
-    augmented_dims = augmented_dimensions!(S,I_d,K,d)
-    # paths that have a corresponding path compatibility variable
-    existing_paths = paths(dims)
-    all_paths = paths(augmented_dims)
-    augmented_paths = Iterators.filter(path -> path ∉ existing_paths, all_paths)
-    K_j = map(y -> y[1],filter(x -> x[2] == d,K))
-    for k in filter(tup -> tup[2] == d, K)
-        index = findfirst(y -> y == k[1] ,I_d)
-        dimensions = dims[index]
-        if k in keys(Pj)
-            indices2 = findall(y -> y in Pj[k] ,I_d)
-            for b in Pj[k]
-                if b in K_j
-                    for (i,j) in combinations(vec(collect(paths(S[Pj[k]]))),2)
-                        @constraint(model,x_xx[k][i]-x_xx[k][j] <= x_x[(b,d)])
-                        @constraint(model,x_xx[k][j]-x_xx[k][i] <= x_x[(b,d)])
-                    end
-                end
-            end
-            for i in paths(S[Pj[k]])
-                zero = Iterators.filter(path -> path[index] == dimensions + 1 && path[indices2] in augment_path!(S,Pj[k],K_j,i), augmented_paths)
-                non_zero = Iterators.filter(path -> path[index] < dimensions + 1 && path[indices2] in augment_path!(S,Pj[k],K_j,i) , all_paths)
-                @constraint(model,sum(z[s...] for s in non_zero) <= length(all_paths)*x_xx[k][i])
-                @constraint(model,sum(z[s...] for s in zero) <= length(all_paths)*(1-x_xx[k][i]))
-            end
-        else
-            zero = Iterators.filter(x -> x[index] == dimensions + 1, augmented_paths)
-            non_zero = Iterators.filter(x -> x[index] < dimensions + 1, all_paths)
-            @constraint(model,sum(z[s...] for s in non_zero) <= length(all_paths)*x_x[k])
-            @constraint(model,sum(z[s...] for s in zero) <= length(all_paths)*(1-x_x[k]))
+    for (k,I_i,z_i) in zip(I.K,I.I_i,I.z)
+        if k in I_d && isempty(I_i)
+            zero = Iterators.filter(x -> x[first(findall(y -> y == k, I_d))] == dimensions[first(findall(y -> y == k, I_d))] + 1, augmented_paths)
+            non_zero = Iterators.filter(x -> x[first(findall(y -> y == k, I_d))] < dimensions[first(findall(y -> y == k, I_d))] + 1, paths(augmented_dims))
+            @constraint(model,sum(z[s...] for s in non_zero) <= length(paths(augmented_dims))*z_i[()...])
+            @constraint(model,sum(z[s...] for s in zero) <= length(paths(augmented_dims))*(1-z_i[()...]))
         end
     end
 end
 
-function augment_path!(S::States, I::Vector{Node},K::Vector{Node},path::Path)
-    dims = S[I]
-    indices = findall(x->x in K, I)
-    paths = []
-    for i in powerset(indices)
-        p = collect(path)
-        for j in i
-            p[j] = dims[j] + 1
-        end
-        push!(paths,Tuple(x for x in p))
-    end
-    paths
-end
-
-function augmented_dimensions!(S::States, I_d::Vector{Node},K::Vector{Tuple{Node,Node}},d::Node)
+function augmented_dimensions!(S::States, I_d::Vector{Node},K::Vector{Node},d::Node)
     dims = S[[I_d; d]]
-    K_j = filter(x -> x[2] == d,K)
+    K_j = filter(i -> i in K, I_d)
     # Add 1 to dimensions for each k \in K(j)
     for i in K_j
-        indices = findall(x->x==i[1], I_d)
+        indices = findall(x->x==i, I_d)
         for j in indices
             dims[j] = dims[j] +1
         end
@@ -569,7 +437,7 @@ end
     expected_value(model::Model,
         diagram::InfluenceDiagram,
         x_s::PathCompatibilityVariables,
-        x_x::Dict{Tuple{Node,Node},VariableRef})
+        x_x::Dict{Node,VariableRef})
 
 Create an expected value objective.
 
@@ -587,23 +455,21 @@ EV = expected_value(model, diagram, x_s,x_x)
 function expected_value(model::Model,
     diagram::InfluenceDiagram,
     x_s::PathCompatibilityVariables;
-    x_x::Dict{Tuple{Node,Node},VariableRef} = Dict{Tuple{Node,Node},VariableRef}(),
-    x_xx::Dict{Tuple{Node,Node},Dict{Path,VariableRef}} = Dict{Tuple{Node,Node},Dict{Path,VariableRef}}())
-    @expression(model, sum(diagram.P(s) * x * diagram.U(s, diagram.translation)  for (s, x) in x_s) - sum(diagram.P(s)/sum(diagram.P(s1) for (s1,x1) in x_s) * cost_of_path(s,diagram,x_xx) for (s, x) in x_s) - sum(diagram.Cs[k] * x for (k,x) in x_x ))
+    I::InformationDecisions = InformationDecisions()
+)
+   #@expression(model, sum(diagram.P(s) * x * diagram.U(s, diagram.translation)  for (s, x) in x_s) - sum(diagram.Cs[k] * z_i[()...] for (k,I_i,z_i) in zip(I.K,I.I_i,I.z) ))
+    @expression(model, sum(x * diagram.U(s, diagram.translation)  for (s, x) in x_s) - sum(diagram.Cs[k] * z_i[()...] for (k,I_i,z_i) in zip(I.K,I.I_i,I.z) ))
+
 end
 
-function cost_of_path(s::Path,diagram::InfluenceDiagram,x_xx::Dict{Tuple{Node,Node},Dict{Path,VariableRef}})
-    cost = 0
-    for x in keys(x_xx)
-        nodes =diagram.Pj[x]
-        for i in keys(x_xx[x])
-            if s[nodes] ==  i
-                cost = cost + diagram.Cs[x] * x_xx[x][i]
-            end
-        end
-    end
-    cost
+function expected_value_pp(model::Model,
+    diagram::InfluenceDiagram,
+    x_s::PathCompatibilityVariables,
+    I::InformationDecisions
+)
+    @expression(model, sum(x * diagram.U(s, diagram.translation, diagram.Cs, diagram.S, filter(k -> !isempty(diagram.I_i[k]),diagram.K))  for (s, x) in x_s) - sum((isempty(I_i) ? diagram.Cs[k] * z_i[()...] : 0) for (k,I_i,z_i) in zip(I.K,I.I_i,I.z)))
 end
+
 
 """
     conditional_value_at_risk(model::Model,
@@ -662,6 +528,7 @@ function conditional_value_at_risk(model::Model,
     @constraint(model, η ≥ u_min)
     @constraint(model, η ≤ u_max)
     ρ′_s = Dict{Path{N}, VariableRef}()
+    λ′_s = Dict{Path{N}, VariableRef}()
     for (s, x) in x_s
         u_s = diagram.U(s, diagram.translation)
         λ = @variable(model, binary=true)
@@ -677,16 +544,17 @@ function conditional_value_at_risk(model::Model,
         @constraint(model, ρ ≤ λ * probability_scale_factor)
         @constraint(model, ρ′ ≤ λ′* probability_scale_factor)
         @constraint(model, ρ ≤ ρ′)
-        @constraint(model, ρ′ ≤ x * diagram.P(s) * probability_scale_factor)
-        @constraint(model, (x * diagram.P(s) - (1 - λ))* probability_scale_factor ≤ ρ)
+        @constraint(model, ρ′ ≤ x * probability_scale_factor)
+        @constraint(model, (x  - (1 - λ))* probability_scale_factor ≤ ρ)
         ρ′_s[s] = ρ′
+        λ′_s[s] = ρ
     end
     @constraint(model, sum(values(ρ′_s)) == α * probability_scale_factor)
 
     # Return CVaR as an expression
     CVaR = @expression(model, sum(ρ_bar * diagram.U(s, diagram.translation) for (s, ρ_bar) in ρ′_s) / (α * probability_scale_factor))
 
-    return CVaR
+    return (λ′_s,η,ρ′_s,CVaR)
 end
 
 # --- Construct decision strategy from JuMP variables ---

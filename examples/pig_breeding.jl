@@ -2,7 +2,7 @@ using Logging
 using JuMP, Gurobi
 using DecisionProgramming
 
-const N = 4
+N = 6
 
 @info("Creating the influence diagram.")
 diagram = InfluenceDiagram()
@@ -66,7 +66,9 @@ optimizer = optimizer_with_attributes(
     "IntFeasTol"      => 1e-9,
 )
 set_optimizer(model, optimizer)
+@time begin
 optimize!(model)
+end
 
 @info("Extracting results.")
 Z = DecisionStrategy(z)
@@ -74,24 +76,24 @@ S_probabilities = StateProbabilities(diagram, Z)
 U_distribution = UtilityDistribution(diagram, Z)
 
 
-@info("Printing decision strategy:")
-print_decision_strategy(diagram, Z, S_probabilities)
+# @info("Printing decision strategy:")
+# print_decision_strategy(diagram, Z, S_probabilities)
 
-@info("Printing utility distribution.")
-print_utility_distribution(U_distribution)
+# @info("Printing utility distribution.")
+# print_utility_distribution(U_distribution)
 
-@info("Printing statistics")
-print_statistics(U_distribution)
+# @info("Printing statistics")
+# print_statistics(U_distribution)
 
-@info("State probabilities:")
-print_state_probabilities(diagram, S_probabilities, [["H$i" for i in 1:N]...])
-print_state_probabilities(diagram, S_probabilities, [["T$i" for i in 1:N-1]...])
-print_state_probabilities(diagram, S_probabilities, [["D$i" for i in 1:N-1]...])
+# @info("State probabilities:")
+# print_state_probabilities(diagram, S_probabilities, [["H$i" for i in 1:N]...])
+# print_state_probabilities(diagram, S_probabilities, [["T$i" for i in 1:N-1]...])
+# print_state_probabilities(diagram, S_probabilities, [["D$i" for i in 1:N-1]...])
 
-@info("Conditional state probabilities")
-for state in ["ill", "healthy"]
-    S_probabilities2 = StateProbabilities(diagram, Z, "H1", state, S_probabilities)
-    print_state_probabilities(diagram, S_probabilities2, [["H$i" for i in 1:N]...])
-    print_state_probabilities(diagram, S_probabilities2, [["T$i" for i in 1:N-1]...])
-    print_state_probabilities(diagram, S_probabilities2, [["D$i" for i in 1:N-1]...])
-end
+# @info("Conditional state probabilities")
+# for state in ["ill", "healthy"]
+#     S_probabilities2 = StateProbabilities(diagram, Z, "H1", state, S_probabilities)
+#     print_state_probabilities(diagram, S_probabilities2, [["H$i" for i in 1:N]...])
+#     print_state_probabilities(diagram, S_probabilities2, [["T$i" for i in 1:N-1]...])
+#     print_state_probabilities(diagram, S_probabilities2, [["D$i" for i in 1:N-1]...])
+# end

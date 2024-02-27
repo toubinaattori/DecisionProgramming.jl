@@ -41,10 +41,17 @@ struct ChanceNode <: AbstractNode
     name::Name
     I_j::Vector{Name}
     states::Vector{Name}
+    can_be_na::Bool
+    I_i::Vector{Name}
     function ChanceNode(name, I_j, states)
-        return new(name, I_j, states)
+        return new(name, I_j, states,false,[])
     end
-
+    function ChanceNode(name, I_j, states,can_be_na)
+        return new(name, I_j, states,can_be_na,[])
+    end
+    function ChanceNode(name, I_j, states,can_be_na,I_i)
+        return new(name, I_j, states,can_be_na,I_i)
+    end
 end
 
 """
@@ -57,15 +64,11 @@ struct DecisionNode <: AbstractNode
     I_j::Vector{Name}
     states::Vector{Name}
     K_j::Vector{Name}
-    P_j::Vector{Tuple{Name,Vector{Name}}}
     function DecisionNode(name, I_j, states,K_j)
-        return new(name, I_j, states,K_j,[])
+        return new(name, I_j, states,K_j)
     end
     function DecisionNode(name, I_j, states)
-        return new(name, I_j, states,[],[])
-    end
-    function DecisionNode(name, I_j, states,K_j,P_j)
-        return new(name, I_j, states,K_j,P_j)
+        return new(name, I_j, states,[])
     end
 end
 
@@ -87,7 +90,7 @@ end
 
 A struct for the cost of edges, includes the edge and the corresponding cost
 """
-
+#=
 struct Costs <: AbstractCosts
     arc::Tuple{Name,Name}
     cost::Float64
@@ -95,9 +98,20 @@ struct Costs <: AbstractCosts
         return new(arc, cost)
     end
 end
+=#
 
-function (C::Vector{Costs})(arc::Tuple{Name,Name})
-    Costs = filter(x -> x.arc == arc,C)
+struct Costs <: AbstractCosts
+    node::Name
+    cost::Float64
+    function Costs(node, cost)
+        return new(node, cost)
+    end
+end
+
+
+
+function (C::Vector{Costs})(node::Name)
+    Costs = filter(x -> x.node == node,C)
     Costs.cost
 end
 
@@ -141,7 +155,7 @@ Base.IndexStyle(::Type{<:States}) = IndexLinear()
 Base.getindex(S::States, i::Int) = getindex(S.vals, i)
 Base.length(S::States) = length(S.vals)
 Base.eltype(S::States) = eltype(S.vals)
-
+Base.setindex!(S::States, i::Int, v::Int) = setindex!(S.vals, i, v)
 
 
 # --- Paths ---
@@ -349,6 +363,10 @@ function (P::DefaultPathProbability)(s::Path)
     prod(X(s[[I_c; c]]) for (c, I_c, X) in zip(P.C, P.I_c, P.X))
 end
 
+function (P::DefaultPathProbability)(s::Path,i::Array{Tuple{Node,Int64}})
+    prod((c in map(x -> x[1],i) && filter(x -> x[1]== c, i)[1][2] == s[c]) ? 1 : X(s[[I_c; c]]) for (c, I_c, X) in zip(P.C, P.I_c, P.X))
+end
+
 
 # --- Utilities ---
 
@@ -460,6 +478,14 @@ function (U::DefaultPathUtility)(s::Path, t::Utility)
     U(s) + t
 end
 
+function (U::DefaultPathUtility)(s::Path, t::Utility, Cs::Dict{Node,Float64}, S::States, K::Vector{Node})
+    U(s) + t - sum(Cs[k] * (s[k] == S[k] ? 0 : 1) for k in K)
+end
+
+function (U::DefaultPathUtility)(s::Path, Cs::Dict{Node,Float64}, S::States, K::Vector{Node})
+    U(s) - sum(Cs[k] * (s[k] == S[k] ? 0 : 1) for k in K)
+end
+
 # --- Influence diagram ---
 """
     mutable struct InfluenceDiagram
@@ -514,8 +540,11 @@ diagram = InfluenceDiagram()
 """
 mutable struct InfluenceDiagram
     Nodes::Vector{AbstractNode}
+    Cost::Vector{AbstractCosts}
+    K_to_NA::Bool
     Names::Vector{Name}
     I_j::Vector{Vector{Node}}
+    I_i::Vector{Vector{Node}}
     States::Vector{Vector{Name}}
     S::States
     C::Vector{Node}
@@ -525,13 +554,11 @@ mutable struct InfluenceDiagram
     Y::Vector{Utilities}
     P::AbstractPathProbability
     U::AbstractPathUtility
-    K::Vector{Tuple{Node,Node}}
-    Pj::Dict{Tuple{Node,Node},Vector{Node}}
-    Cost::Vector{AbstractCosts}
-    Cs::Dict{Tuple{Node,Node},Float64}
+    K::Vector{Node}
+    Cs::Dict{Node,Float64}
     translation::Utility
     function InfluenceDiagram()
-        new(Vector{AbstractNode}())
+        new(Vector{AbstractNode}(),Vector{AbstractCosts}(),false)
     end
 end
 
@@ -559,6 +586,9 @@ function validate_node(diagram::InfluenceDiagram,
     if !value_node
         if length(states) < 2
             throw(DomainError("Each chance and decision node should have more than one state."))
+        end
+        if "N/A" in states
+            throw(DomainError("Don't use N/A as state."))
         end
     end
 
@@ -726,7 +756,6 @@ function add_probabilities!(diagram::InfluenceDiagram, node::Name, probabilities
     if c ∈ [j.c for j in diagram.X]
         throw(DomainError("Probabilities should be added only once for each node."))
     end
-
     if size(probabilities) == Tuple((diagram.S[j] for j in (diagram.I_j[c]..., c)))
         if isa(probabilities, ProbabilityMatrix)
             # Check that probabilities sum to one happesn in Probabilities
@@ -940,14 +969,14 @@ function generate_arcs!(diagram::InfluenceDiagram)
     # Declare vectors for results (final resting place InfluenceDiagram.Names and InfluenceDiagram.I_j)
     Names = Vector{Name}(undef, n_CD+n_V)
     I_j = Vector{Vector{Node}}(undef, n_CD+n_V)
+    I_i = Vector{Vector{Node}}(undef, n_CD)
     states = Vector{Vector{Name}}()
     S = Vector{State}(undef, n_CD)
     C = Vector{Node}()
     D = Vector{Node}()
     V = Vector{Node}()
-    K = Vector{Tuple{Node,Node}}()
-    Pj = Dict{Tuple{Node,Node},Vector{Node}}()
-    Cs = Dict{Tuple{Node,Node},Float64}()
+    K = Vector{Node}()
+    Cs = Dict{Node,Float64}()
     # Declare helper collections
     indices = Dict{Name, Node}()
     indexed_nodes = Set{Name}()
@@ -967,16 +996,25 @@ function generate_arcs!(diagram::InfluenceDiagram)
             S[index] = State(length(j.states))
             if isa(j, ChanceNode)
                 push!(C, Node(index))
+                I_i[index] = map(x -> Node(indices[x]), j.I_i)
+                if j.can_be_na
+                    if !isempty(j.I_i)
+                        append!(j.states,["N/A"])
+                        S[index] = State(length(j.states))
+                    end
+                    push!(K, Node(index))
+                    Cs[Node(index)] = filter(x -> x.node == j.name, diagram.Cost)[1].cost
+                end
             else
                 push!(D, Node(index))
-                for k in j.K_j
-                    push!(K,(Node(indices[k]), index))
-                    cost = filter(x -> x.arc[1]==k && x.arc[2] == j.name,diagram.Cost)
-                    Cs[(indices[k],index)] = cost[1].cost
-                end
-                for r in j.P_j
-                    Pj[(Node(indices[r[1]]), index)] = map(t -> indices[t],r[2])
-                end
+ #               for k in j.K_j
+ #                   push!(K,(Node(indices[k]), index))
+ #                   push!(K,(Node(indices[k]), index))
+  #                  cost = filter(x -> x.arc[1]==k && x.arc[2] == j.name,diagram.Cost)
+  #                  Cs[(indices[k],index)] = cost[1].cost
+  #                  Cs[indices[k]] = filter(x -> x.node == k, diagram.Cost)[1].cost
+  #              end
+                I_i[index] = []
             end
             # Increase index
             index += 1
@@ -1001,13 +1039,13 @@ function generate_arcs!(diagram::InfluenceDiagram)
     end
     diagram.Names = Names
     diagram.I_j = I_j
+    diagram.I_i = I_i
     diagram.States = states
     diagram.S = States(S)
     diagram.C = C
     diagram.D = D
     diagram.V = V
     diagram.K = K
-    diagram.Pj = Pj
     diagram.Cs = Cs
     # Declaring X and Y
     diagram.X = Vector{Probabilities}()
@@ -1066,8 +1104,13 @@ function generate_diagram!(diagram::InfluenceDiagram;
     if default_utility
         diagram.U = DefaultPathUtility(diagram.I_j[diagram.V], diagram.Y)
         if positive_path_utility
+            can_be_na = findall(x -> "N/A" in x,diagram.States)
             # Conversion to Float32 using Utility(), since machine default is Float64
-            diagram.translation = 1 -  minimum(diagram.U(s) for s in paths(diagram.S))
+            if isempty(can_be_na)
+                diagram.translation = 1 -  minimum(diagram.U(s) for s in paths(diagram.S))
+            else
+                diagram.translation = 1 -  minimum(diagram.U(s, diagram.Cs, diagram.S, diagram.K) for s in paths(diagram.S))
+            end
         elseif negative_path_utility
             diagram.translation = -1 - maximum(diagram.U(s) for s in paths(diagram.S))
         else

@@ -52,8 +52,13 @@ add_utilities!(diagram, "V", Y_V)
 
 generate_diagram!(diagram,positive_path_utility = true)
 
+
+
+
+
+
 model = Model()
-z = DecisionVariables(model, diagram, augmented_states = true,names=true, name = "z")
+z = DecisionVariables(model, diagram,names=true, name = "z")
 x_s = PathCompatibilityVariables(model, diagram, z, names=true, name = "s", augmented_states = true, probability_cut = false)
 (x_x,x_xx) = StateDependentAugmentedStateVariables(model,diagram,z,x_s,names=true,name="x")
 EV = expected_value(model, diagram, x_s,x_x = x_x, x_xx = x_xx)
